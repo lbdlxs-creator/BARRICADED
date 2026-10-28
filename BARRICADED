@@ -1,0 +1,673 @@
+--=====================================================================
+--  BARRICADED | VENICE LITE v5
+--  Hitbox Extender (cabeca) + ESP (vermelho inimigo / verde aliado)
+--  v5: hitbox por padrao SO EM INIMIGO (aliado fica normal)
+--=====================================================================
+
+local Players    = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace  = game:GetService("Workspace")
+local CoreGui    = game:GetService("CoreGui")
+
+local LP     = Players.LocalPlayer
+local Camera = Workspace.CurrentCamera
+
+local conns = {}
+local function on(sig, fn) conns[#conns + 1] = sig:Connect(fn) end
+
+on(Workspace:GetPropertyChangedSignal("CurrentCamera"), function()
+	if Workspace.CurrentCamera then Camera = Workspace.CurrentCamera end
+end)
+
+local C = {
+	Hitbox      = true,
+	HBTarget    = "So inimigos",   -- "So inimigos" | "Todos (menos eu)" | "Todos (comigo)"
+	Mode        = "Cabeca",        -- "Cabeca" | "Parte extra" | "Ambos"
+	HitboxSize  = 8,
+	HeadInvisible = true,
+	ShowHitbox  = false,
+	NoCollide   = true,
+	Massless    = true,
+
+	ESP          = true,
+	ESPNames     = true,
+	ESPDist      = true,
+	ESPKind      = false,
+	ESPOnlyEnemy = false,
+	ESPUseHL     = true,
+	MaxDist      = 900,
+	MaxHL        = 30,
+
+	ColorEnemy  = Color3.fromRGB(255, 60, 60),
+	ColorAlly   = Color3.fromRGB(60, 255, 90),
+}
+
+--============================= KEYWORDS =============================
+local ZW = { "zomb","zumbi","infect","undead","ghoul","skeleton","esqueleto","intruder",
+             "tank","bone","nightmare","devourer","burnt","clark","chicken","morto","dead" }
+local HW = { "human","humano","survivor","sobrevivente","alive","vivo","living" }
+
+local SZ = { "zomb","zumbi","infect","undead","morto","dead" }
+local SH = { "human","humano","survivor","sobrevivente","civil","vivo","alive" }
+
+local function score(s, zl, hl)
+	local z, h = 0, 0
+	for _, w in ipairs(zl) do if s:find(w, 1, true) then z = z + 1 end end
+	for _, w in ipairs(hl) do if s:find(w, 1, true) then h = h + 1 end end
+	if z > h then return "zombie" elseif h > z then return "human" end
+	return nil
+end
+
+local function kindOf(s)
+	if not s then return nil end
+	return score(tostring(s):lower(), ZW, HW)
+end
+
+local function teamKind(plr)
+	if not plr or not plr.Team then return nil end
+	return score(plr.Team.Name:lower(), SZ, SH)
+end
+
+local RIGSET = {}
+for _, n in ipairs({
+	"humanoid","humanoidrootpart","humanoiddescription","animator","animate","torso",
+	"uppertorso","lowertorso","head","leftarm","rightarm","leftupperarm","rightupperarm",
+	"leftlowerarm","rightlowerarm","leftleg","rightleg","leftupperleg","rightupperleg",
+	"leftlowerleg","rightlowerleg","leftfoot","rightfoot","shirt","pants","bodycolors",
+	"accessory","handle","waist","neck",
+}) do RIGSET[n] = true end
+
+--============================= DETECCAO =============================
+local function detectKind(plr, char)
+	local k = teamKind(plr)
+	if k then return k end
+
+	local insts = {}
+	if plr then insts[#insts + 1] = plr end
+	if char then insts[#insts + 1] = char end
+
+	for _, inst in ipairs(insts) do
+		local ok, a = pcall(function() return inst:GetAttributes() end)
+		if ok and a then
+			local z, h = 0, 0
+			for kk, v in pairs(a) do
+				local kr = kindOf(kk)
+				if kr then
+					if typeof(v) == "boolean" then
+						if (kr == "zombie") == v then z = z + 1 else h = h + 1 end
+					elseif typeof(v) == "string" then
+						local vr = kindOf(v)
+						if vr == "zombie" then z = z + 1 elseif vr == "human" then h = h + 1 end
+					end
+				end
+			end
+			if z > h then return "zombie" elseif h > z then return "human" end
+		end
+	end
+
+	if char then
+		if not (plr and char.Name == plr.Name) then
+			local r = kindOf(char.Name)
+			if r then return r end
+		end
+		local z, h = 0, 0
+		for _, d in ipairs(char:GetChildren()) do
+			if not RIGSET[d.Name:lower()] then
+				local r = kindOf(d.Name)
+				if r == "zombie" then z = z + 1 elseif r == "human" then h = h + 1 end
+			end
+		end
+		if z > h then return "zombie" elseif h > z then return "human" end
+	end
+	return nil
+end
+
+local getMyKind
+local myCache   = { k = nil, t = 0 }
+local kindCache = {}
+local npcCache  = setmetatable({}, { __mode = "k" })
+
+getMyKind = function()
+	local now = os.clock()
+	if myCache.k and now - myCache.t < 1 then return myCache.k end
+	myCache.k, myCache.t = detectKind(LP, LP.Character), now
+	return myCache.k
+end
+
+local function getKind(plr, char)
+	if not plr or plr == LP then return getMyKind() end
+	local now = os.clock()
+	local c = kindCache[plr]
+	if c and now - c.t < 1 then return c.k end
+	local k = detectKind(plr, char)
+	kindCache[plr] = { k = k, t = now }
+	return k
+end
+
+local function getNpcKind(ent)
+	local now = os.clock()
+	local c = npcCache[ent]
+	if c and now - c.t < 1 then return c.k end
+	local k = detectKind(nil, ent)
+	npcCache[ent] = { k = k, t = now }
+	return k
+end
+
+local function isAlly(ent)
+	if not ent or ent == LP.Character then return true end
+	local mine = getMyKind()
+
+	local plr = Players:GetPlayerFromCharacter(ent)
+	if not plr then
+		local k = getNpcKind(ent)
+		if k and mine then return k == mine end
+		return false
+	end
+	if plr == LP then return true end
+
+	local k = getKind(plr, ent)
+	if k and mine then return k == mine end
+
+	local tm = teamKind(LP)
+	if tm then return teamKind(plr) == tm end
+	return false
+end
+
+--============================== ALVOS ==============================
+local targets = {}
+
+local function isEntity(m)
+	if not m:IsA("Model") then return false end
+	if m:FindFirstChildOfClass("Humanoid") then return true end
+	if m:FindFirstChild("HumanoidRootPart") then return true end
+	if m:FindFirstChild("Head") and (m:FindFirstChild("Torso") or m:FindFirstChild("UpperTorso")) then
+		return true
+	end
+	return false
+end
+
+local function refreshTargets()
+	table.clear(targets)
+	local seen = {}
+
+	-- voce sempre entra na lista; quem filtra e o loop da hitbox
+	local me = LP.Character
+	if me and me.Parent then
+		seen[me] = true
+		targets[#targets + 1] = me
+	end
+
+	for _, p in ipairs(Players:GetPlayers()) do
+		local ch = p.Character
+		if ch and ch.Parent and not seen[ch] then
+			seen[ch] = true
+			targets[#targets + 1] = ch
+		end
+	end
+
+	local stack = { Workspace }
+	while #stack > 0 do
+		local node = stack[#stack]
+		stack[#stack] = nil
+		for _, d in ipairs(node:GetChildren()) do
+			if d:IsA("Model") then
+				if seen[d] then
+					-- ja e alvo: nao desce
+				elseif isEntity(d) then
+					seen[d] = true
+					targets[#targets + 1] = d
+				else
+					stack[#stack + 1] = d
+				end
+			elseif d:IsA("Folder") then
+				stack[#stack + 1] = d
+			end
+		end
+	end
+end
+
+local function alive(ent)
+	local hum = ent:FindFirstChildOfClass("Humanoid")
+	if hum then return hum.Health > 0 end
+	return true
+end
+
+--========================= HITBOX EXTENDER ==========================
+local hb = {}
+
+local function hbAllowed(ent)
+	local isMe = (ent == LP.Character)
+	if C.HBTarget == "Todos (comigo)" then return true end
+	if C.HBTarget == "Todos (menos eu)" then return not isMe end
+	return (not isMe) and (not isAlly(ent))     -- padrao: SO INIMIGO
+end
+
+local function findHead(char)
+	local h = char:FindFirstChild("Head")
+	if h and h:IsA("BasePart") then return h end
+	for _, d in ipairs(char:GetDescendants()) do
+		if d:IsA("BasePart") and d.Name:lower():find("head", 1, true) then return d end
+	end
+	local best, bestY = nil, -math.huge
+	for _, d in ipairs(char:GetDescendants()) do
+		if d:IsA("BasePart") and d.Position.Y > bestY then best, bestY = d, d.Position.Y end
+	end
+	if best then return best end
+	local r = char:FindFirstChild("HumanoidRootPart") or char.PrimaryPart
+	if r and r:IsA("BasePart") then return r end
+	return nil
+end
+
+local function sizeFor(base)
+	local want = base * C.HitboxSize
+	local big = math.max(want.X, math.max(want.Y, want.Z))
+	if big > 30 then want = want * (30 / big) end
+	return want
+end
+
+local function wantTrans(d)
+	if C.ShowHitbox then return 0.55 end
+	if C.HeadInvisible then return 1 end
+	return d.trans
+end
+
+local function restoreHead(d)
+	if not d then return end
+	local p = d.part
+	if p and p.Parent then
+		pcall(function()
+			p.Size = d.base
+			p.Transparency = d.trans
+			p.Color = d.color
+			p.CanCollide = d.collide
+			p.Massless = d.massless
+		end)
+	end
+	for _, x in ipairs(d.decals) do
+		if x[1] and x[1].Parent then x[1].Transparency = x[2] end
+	end
+end
+
+local function killExtra(d)
+	if d and d.extra and d.extra.Parent then d.extra:Destroy() end
+	if d then d.extra = nil end
+end
+
+local function makeExtra(char, head, base)
+	local p = Instance.new("Part")
+	p.Name = "VeniceHitbox"
+	p.Anchored = true
+	p.CanCollide = false
+	p.Massless = true
+	p.Material = Enum.Material.SmoothPlastic
+	p.Color = Color3.fromRGB(0, 200, 255)
+	p.Size = sizeFor(base)
+	p.CFrame = head.CFrame
+	p.Transparency = C.ShowHitbox and 0.55 or 1
+	p.Parent = char
+	return p
+end
+
+local function addHitbox(char)
+	local d = hb[char]
+	if not d or not d.part or not d.part.Parent then
+		local part = findHead(char)
+		if not part then return end
+		if d then restoreHead(d); killExtra(d) end
+
+		d = {
+			part = part, base = part.Size, trans = part.Transparency,
+			color = part.Color, collide = part.CanCollide, massless = part.Massless,
+			decals = {}, extra = nil,
+		}
+		for _, x in ipairs(part:GetChildren()) do
+			if x:IsA("Decal") then d.decals[#d.decals + 1] = { x, x.Transparency } end
+		end
+		hb[char] = d
+	end
+
+	local part   = d.part
+	local resize = (C.Mode == "Cabeca" or C.Mode == "Ambos")
+	local extra  = (C.Mode == "Parte extra" or C.Mode == "Ambos")
+	local wt     = wantTrans(d)
+
+	if resize then
+		local want = sizeFor(d.base)
+		if part.Size ~= want then part.Size = want end
+		if part.Transparency ~= wt then
+			part.Transparency = wt
+			for _, x in ipairs(d.decals) do
+				if x[1] and x[1].Parent then x[1].Transparency = wt end
+			end
+		end
+		if C.ShowHitbox then
+			if part.Color ~= Color3.fromRGB(0, 200, 255) then part.Color = Color3.fromRGB(0, 200, 255) end
+		elseif part.Color ~= d.color then
+			part.Color = d.color
+		end
+		if C.Massless and not part.Massless then part.Massless = true end
+		if C.NoCollide and part.CanCollide then part.CanCollide = false end
+	else
+		if part.Size ~= d.base then part.Size = d.base end
+		if part.Transparency ~= d.trans then part.Transparency = d.trans end
+		if part.Color ~= d.color then part.Color = d.color end
+		if part.CanCollide ~= d.collide then part.CanCollide = d.collide end
+		if part.Massless ~= d.massless then part.Massless = d.massless end
+	end
+
+	if extra then
+		if not d.extra or not d.extra.Parent then
+			d.extra = makeExtra(char, part, d.base)
+		else
+			d.extra.Size = sizeFor(d.base)
+			d.extra.Transparency = wt
+		end
+	elseif d.extra then
+		killExtra(d)
+	end
+end
+
+local function delHitbox(char)
+	local d = hb[char]
+	if d then restoreHead(d); killExtra(d) end
+	hb[char] = nil
+end
+
+local function clearHitboxes()
+	for c in pairs(hb) do delHitbox(c) end
+	table.clear(hb)
+end
+
+--=============================== LOOPS ==============================
+on(RunService.RenderStepped, function()
+	if not C.Hitbox then return end
+	local resize = (C.Mode == "Cabeca" or C.Mode == "Ambos")
+
+	for _, d in pairs(hb) do
+		local p = d.part
+		if p and p.Parent then
+			if resize then
+				local want = sizeFor(d.base)
+				if p.Size ~= want then p.Size = want end
+				local wt = wantTrans(d)
+				if p.Transparency ~= wt then p.Transparency = wt end
+				if C.Massless and not p.Massless then p.Massless = true end
+				if C.NoCollide and p.CanCollide then p.CanCollide = false end
+			end
+			local ex = d.extra
+			if ex and ex.Parent then
+				if ex.CFrame ~= p.CFrame then ex.CFrame = p.CFrame end
+				if ex.Transparency ~= wantTrans(d) then ex.Transparency = wantTrans(d) end
+			end
+		end
+	end
+end)
+
+task.spawn(function()
+	while true do
+		refreshTargets()
+		task.wait(0.5)
+	end
+end)
+
+task.spawn(function()
+	while true do
+		task.wait(0.25)
+		pcall(function()
+			if not C.Hitbox then
+				if next(hb) then clearHitboxes() end
+				return
+			end
+			local active = {}
+			for _, ent in ipairs(targets) do
+				if ent.Parent and hbAllowed(ent) then
+					active[ent] = true
+					addHitbox(ent)
+				end
+			end
+			for c in pairs(hb) do
+				if not active[c] then delHitbox(c) end
+			end
+		end)
+	end
+end)
+
+--================================ ESP ===============================
+local espData = {}
+
+local function anchorOf(ent)
+	return ent:FindFirstChild("HumanoidRootPart")
+		or ent:FindFirstChild("Head")
+		or ent:FindFirstChild("Torso")
+		or ent.PrimaryPart
+end
+
+local function makeESP(ent, root)
+	local hl = Instance.new("Highlight")
+	hl.Name = "VeniceESP"
+	hl.FillTransparency = 0.55
+	hl.OutlineTransparency = 0
+	hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	hl.Adornee = ent
+	hl.Parent = ent
+
+	local bb = Instance.new("BillboardGui")
+	bb.Name = "VeniceTag"
+	bb.Size = UDim2.new(0, 170, 0, 22)
+	bb.StudsOffset = Vector3.new(0, 3.5, 0)
+	bb.AlwaysOnTop = true
+	bb.MaxDistance = C.MaxDist
+	bb.Adornee = root
+	bb.Parent = root
+
+	local lbl = Instance.new("TextLabel")
+	lbl.Size = UDim2.new(1, 0, 1, 0)
+	lbl.BackgroundTransparency = 1
+	lbl.Font = Enum.Font.GothamBold
+	lbl.TextScaled = true
+	lbl.TextStrokeTransparency = 0
+	lbl.TextStrokeColor3 = Color3.new(0, 0, 0)
+	lbl.Text = ""
+	lbl.Parent = bb
+
+	return { hl = hl, bb = bb, lbl = lbl }
+end
+
+local function espDestroy(d)
+	if not d then return end
+	if d.hl then d.hl:Destroy() end
+	if d.bb then d.bb:Destroy() end
+end
+
+local espCount = 0
+
+local function updateESP()
+	local camPos = Camera.CFrame.Position
+	local list = {}
+
+	if C.ESP then
+		for _, ent in ipairs(targets) do
+			if ent ~= LP.Character and ent.Parent and alive(ent) then
+				local ally = isAlly(ent)
+				if not (C.ESPOnlyEnemy and ally) then
+					local root = anchorOf(ent)
+					if root then
+						local dist = (root.Position - camPos).Magnitude
+						if dist <= C.MaxDist then
+							list[#list + 1] = { ent = ent, root = root, dist = dist, ally = ally }
+						end
+					end
+				end
+			end
+		end
+	end
+
+	for ent, d in pairs(espData) do
+		if not C.ESP or not ent.Parent or not alive(ent) then
+			espDestroy(d)
+			espData[ent] = nil
+		end
+	end
+
+	table.sort(list, function(a, b) return a.dist < b.dist end)
+	espCount = #list
+
+	for i, e in ipairs(list) do
+		local d = espData[e.ent]
+		if not d or not d.hl.Parent or not d.bb.Parent then
+			if d then espDestroy(d) end
+			d = makeESP(e.ent, e.root)
+			espData[e.ent] = d
+		end
+
+		local plr = Players:GetPlayerFromCharacter(e.ent)
+		local col = e.ally and C.ColorAlly or C.ColorEnemy
+
+		d.hl.FillColor    = col
+		d.hl.OutlineColor = col
+		d.hl.Enabled      = C.ESPUseHL and i <= C.MaxHL
+
+		d.lbl.TextColor3 = col
+		local txt = plr and plr.Name or e.ent.Name
+		if C.ESPKind then txt = txt .. "  (" .. (e.ally and "ALIADO" or "INIMIGO") .. ")" end
+		if C.ESPDist then txt = txt .. "  [" .. math.floor(e.dist) .. "m]" end
+		d.lbl.Text = txt
+		d.lbl.Visible = C.ESPNames
+
+		if d.bb.MaxDistance ~= C.MaxDist then d.bb.MaxDistance = C.MaxDist end
+		if d.bb.Parent ~= e.root then
+			d.bb.Adornee = e.root
+			d.bb.Parent  = e.root
+		end
+	end
+end
+
+task.spawn(function()
+	while true do
+		task.wait(0.1)
+		pcall(updateESP)
+	end
+end)
+
+--================================ HUD ===============================
+local hud = Instance.new("ScreenGui")
+hud.Name = "VeniceLiteHUD"
+hud.ResetOnSpawn = false
+hud.IgnoreGuiInset = true
+if not pcall(function() hud.Parent = CoreGui end) then
+	hud.Parent = LP:WaitForChild("PlayerGui")
+end
+
+local hudLbl = Instance.new("TextLabel")
+hudLbl.BackgroundColor3 = Color3.new(0, 0, 0)
+hudLbl.BackgroundTransparency = 0.35
+hudLbl.TextColor3 = Color3.fromRGB(120, 255, 140)
+hudLbl.Font = Enum.Font.Code
+hudLbl.TextSize = 14
+hudLbl.TextXAlignment = Enum.TextXAlignment.Left
+hudLbl.TextYAlignment = Enum.TextYAlignment.Top
+hudLbl.Position = UDim2.new(0, 8, 0, 8)
+hudLbl.Size = UDim2.new(0, 330, 0, 80)
+hudLbl.Text = "Venice Lite v5"
+hudLbl.Parent = hud
+
+task.spawn(function()
+	while true do
+		task.wait(0.4)
+		local n = 0
+		for _ in pairs(hb) do n = n + 1 end
+		hudLbl.Text = string.format(
+			"VENICE LITE v5   [%s]\nhitbox: %d   alvos: %d\nesp: %d   eu sou: %s\nmassless: %s   cabeça: %s",
+			C.HBTarget, n, #targets, espCount, tostring(getMyKind()),
+			tostring(C.Massless), C.HeadInvisible and "invisivel" or "visivel")
+	end
+end)
+
+print("[VENICE LITE v5] carregado. hitbox em: " .. C.HBTarget)
+
+--============================= CLEANUP ==============================
+local function unload()
+	clearHitboxes()
+	for _, d in pairs(espData) do espDestroy(d) end
+	table.clear(espData)
+	if hud then hud:Destroy() end
+	for _, c in ipairs(conns) do pcall(function() c:Disconnect() end) end
+end
+
+on(Players.PlayerRemoving, function(p) kindCache[p] = nil end)
+
+--================================ UI ================================
+local ok, err = pcall(function()
+	local WindUI = loadstring(game:HttpGet("https://github.com/Footagesus/WindUI/releases/latest/download/main.lua"))()
+
+	local Window = WindUI:CreateWindow({
+		Title = "BARRICADED | Venice Lite",
+		Icon = "swords",
+		Author = "v5",
+		Folder = "BarricadedVenice",
+		Size = UDim2.fromOffset(560, 520),
+		ToggleKey = Enum.KeyCode.RightControl,
+		Transparent = true,
+		Theme = "Dark",
+		Resizable = true,
+		HideSearchBar = true,
+	})
+
+	local Tab = Window:Tab({ Title = "Principal", Icon = "settings" })
+
+	local SH = Tab:Section({ Title = "Hitbox Extender" })
+	SH:Toggle({ Title = "Ativar Hitbox", Value = true,
+		Callback = function(v) C.Hitbox = v; if not v then clearHitboxes() end end })
+	SH:Dropdown({
+		Title = "Quem recebe",
+		Desc = "Padrao: so inimigo. Teu time fica com a cabeca normal.",
+		Values = { "So inimigos", "Todos (menos eu)", "Todos (comigo)" },
+		Value = "So inimigos",
+		Callback = function(v) C.HBTarget = v; clearHitboxes() end,
+	})
+	SH:Dropdown({ Title = "Modo", Desc = "Se travar, use 'Parte extra'.",
+		Values = { "Cabeca", "Parte extra", "Ambos" }, Value = "Cabeca",
+		Callback = function(v) C.Mode = v; clearHitboxes() end })
+	SH:Slider({ Title = "Tamanho", Step = 0.5, Value = { Min = 1, Max = 20, Default = 8 },
+		Callback = function(v) C.HitboxSize = v end })
+	SH:Toggle({ Title = "Cabeca invisivel", Desc = "Desligue pra ver a cabeca grande.",
+		Value = true, Callback = function(v) C.HeadInvisible = v end })
+	SH:Toggle({ Title = "Hitbox visivel (azul)", Value = false,
+		Callback = function(v) C.ShowHitbox = v end })
+	SH:Toggle({ Title = "Cabeca sem peso (Massless) - IMPORTANTE", Value = true,
+		Callback = function(v) C.Massless = v end })
+	SH:Toggle({ Title = "Cabeca sem colisao", Value = true,
+		Callback = function(v) C.NoCollide = v; clearHitboxes() end })
+	SH:Button({ Title = "Descongelar agora", Callback = function()
+		clearHitboxes(); task.wait(0.3)
+		for _, ent in ipairs(targets) do if ent.Parent and hbAllowed(ent) then addHitbox(ent) end end
+	end })
+	SH:Button({ Title = "Restaurar tudo", Callback = function() clearHitboxes() end })
+
+	local SE = Tab:Section({ Title = "ESP" })
+	SE:Toggle({ Title = "Ativar ESP", Value = true, Callback = function(v) C.ESP = v end })
+	SE:Toggle({ Title = "Mostrar nomes", Value = true, Callback = function(v) C.ESPNames = v end })
+	SE:Toggle({ Title = "Mostrar distancia", Value = true, Callback = function(v) C.ESPDist = v end })
+	SE:Toggle({ Title = "Mostrar ALIADO/INIMIGO", Value = false, Callback = function(v) C.ESPKind = v end })
+	SE:Toggle({ Title = "So inimigos", Value = false, Callback = function(v) C.ESPOnlyEnemy = v end })
+	SE:Toggle({ Title = "Usar Highlight", Value = true, Callback = function(v) C.ESPUseHL = v end })
+	SE:Slider({ Title = "Distancia maxima (m)", Step = 10, Value = { Min = 50, Max = 2000, Default = 900 },
+		Callback = function(v) C.MaxDist = v end })
+	SE:Slider({ Title = "Maximo de highlights", Step = 1, Value = { Min = 5, Max = 30, Default = 30 },
+		Callback = function(v) C.MaxHL = v end })
+
+	local SC = Tab:Section({ Title = "Cores" })
+	SC:Colorpicker({ Title = "Inimigo", Default = Color3.fromRGB(255, 60, 60), Callback = function(c) C.ColorEnemy = c end })
+	SC:Colorpicker({ Title = "Aliado",  Default = Color3.fromRGB(60, 255, 90), Callback = function(c) C.ColorAlly = c end })
+
+	local SX = Tab:Section({ Title = "Sistema" })
+	SX:Button({ Title = "Descarregar (unload limpo)", Callback = function()
+		unload(); Window:Destroy()
+	end })
+
+	WindUI:Notify({ Title = "Venice Lite v5", Content = "Hitbox agora padrao SO INIMIGO.", Duration = 7 })
+end)
+
+if not ok then
+	print("[VENICE LITE] erro na UI (hitbox/ESP seguem rodando): " .. tostring(err))
+end
